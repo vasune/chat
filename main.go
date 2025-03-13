@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chat/internal/auth"
 	"chat/internal/database"
 	"chat/internal/handlers"
 	"log"
@@ -10,11 +11,13 @@ import (
 func main() {
 	database.SetupDB()
 
-	http.HandleFunc("/chat", handlers.HandleConnections)
-	http.HandleFunc("/signup", handlers.HandleSignUp)
-	http.HandleFunc("/signin", handlers.HandleSignIn)
+	go handlers.HandleMessages()
+
+	http.Handle("/chat", auth.JWTMiddleware(http.HandlerFunc(handlers.HandlerChat)))
+
+	http.HandleFunc("/signup", handlers.HandlerSignUp)
+	http.HandleFunc("/signin", handlers.HandlerSignIn)
 
 	log.Println("Server started")
-	log.Println("negr")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe("0.0.0.0:8080", nil))
 }
