@@ -2,32 +2,46 @@ package database
 
 import (
 	"chat/internal/config"
-	"chat/internal/models"
+	"database/sql"
+	"fmt"
 	"log"
 
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-var DB *gorm.DB
+var DB *sql.DB
 
 func SetupDB() {
 	config.LoadCfg()
-	dsn := "host=" + config.AppConfig.PostgresHost +
-		" user=" + config.AppConfig.PostgresUser +
-		" password=" + config.AppConfig.PostgresPassword +
-		" dbname=" + config.AppConfig.PostgresDB +
-		" port=" + config.AppConfig.PostgresPort
+	dsn := fmt.Sprintf(
+		"user=%s password=%s host=%s port=%s dbname=%s",
+		config.AppConfig.PostgresUser,
+		config.AppConfig.PostgresPassword,
+		config.AppConfig.PostgresHost,
+		config.AppConfig.PostgresPort,
+		config.AppConfig.PostgresDB,
+	)
 
 	var err error
-	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{TranslateError: true})
+	DB, err = sql.Open("pgx", dsn)
 	if err != nil {
-		log.Println(err)
-		return
+		log.Fatal("Failed to connect to database:", err)
 	}
 
-	if err := DB.AutoMigrate(&models.User{}); err != nil {
-		log.Println(err)
-		return
+	if err = DB.Ping(); err != nil {
+		log.Fatal("Failed to ping database", err)
 	}
+
+	_, err = DB.Exec(`
+		CREATE TABLE IF NOT EXISTS users (
+			id SERIAL PRIMARY KEY,
+			username TEXT UNIQUE NOT NULL,
+			password_hash TEXT NOT NULL
+			)
+	`)
+	if err != nil {
+		log.Fatal("Failed to create users table:", err)
+	}
+
+	log.Println("Database initialized")
 }

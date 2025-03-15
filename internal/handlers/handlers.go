@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -11,7 +12,7 @@ import (
 
 	"chat/internal/auth"
 	"chat/internal/database"
-	"chat/internal/models"
+	"chat/internal/entity"
 )
 
 type UserRequest struct {
@@ -48,10 +49,16 @@ func HandlerSignUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var user models.User
-	result := database.DB.Where("username = ?", userRequest.Username).First(&user)
-	if result.Error == nil {
+	var existingID int
+	err := database.DB.QueryRow(
+		"SELECT id FROM users WHERE username = $1",
+		userRequest.Username,
+	).Scan(&existingID)
+
+	if err == nil {
 		http.Error(w, "User already exist", http.StatusConflict)
+	} else if err != sql.ErrNoRows {
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
@@ -61,16 +68,19 @@ func HandlerSignUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newUser := models.User{
-		Username:     userRequest.Username,
-		PasswordHash: string(hashedPassword),
-	}
-	result = database.DB.Create(&newUser)
-	if result.Error != nil {
+	var userID int
+	err = database.DB.QueryRow(
+		"INSERT INTO users (username, passowrd_hash) VALUES ($1, $2) RETURNING id",
+		userRequest.Username,
+		string(hashedPassword),
+	).Scan(&userID)
+
+	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
-	token := auth.JWTCreate(user.ID)
+
+	token := auth.JWTCreate(uint(userID))
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 
@@ -87,10 +97,17 @@ func HandlerSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var user models.User
-	result := database.DB.Where("username = ?", userRequest.Username).First(&user)
-	if result.Error != nil {
+	var user entity.User
+	err := database.DB.QueryRow(
+		"SELECT id, password_hash FROM users WHERE username = $1",
+		userRequest.Username,
+	).Scan(&user.ID, &user.PasswordHash)
+
+	if err == sql.ErrNoRows {
 		http.Error(w, "User not found", http.StatusBadRequest)
+		return
+	} else if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
@@ -111,10 +128,14 @@ func HandlerChat(w http.ResponseWriter, r *http.Request) {
 		log.Println("UserID not found in context")
 		return
 	}
-	var user models.User
-	if err := database.DB.First(&user, userID).Error; err != nil {
-		log.Println("User not found", err)
-		return
+	var user entity.User
+	err := database.DB.QueryRow(
+		"SELECT username FROM users WHERE id = $1",
+		userID,
+	).Scan(&user.Username)
+
+	if err != nil {
+		log.Println("User not found:", err)
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
