@@ -70,7 +70,7 @@ func HandlerSignUp(w http.ResponseWriter, r *http.Request) {
 
 	var userID int
 	err = database.DB.QueryRow(
-		"INSERT INTO users (username, passowrd_hash) VALUES ($1, $2) RETURNING id",
+		"INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id",
 		userRequest.Username,
 		string(hashedPassword),
 	).Scan(&userID)
