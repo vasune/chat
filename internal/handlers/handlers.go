@@ -1,200 +1,72 @@
 package handlers
 
 import (
-	"database/sql"
+	"chat/internal/usecases"
 	"encoding/json"
-	"log"
 	"net/http"
-	"sync"
-
-	"github.com/gorilla/websocket"
-	"golang.org/x/crypto/bcrypt"
-
-	"chat/internal/auth"
-	"chat/internal/database"
-	"chat/internal/entity"
 )
 
-type UserRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+type AuthHandler struct {
+	AuthUC usecases.Auth
 }
 
-type Message struct {
-	Data string `json:"data"`
+func NewAuthHandler(useCases usecases.Auth) *AuthHandler {
+	return &AuthHandler{AuthUC: useCases}
 }
 
-var (
-	messages  []map[string]interface{}
-	clients   = make(map[*websocket.Conn]string)
-	messageCh = make(chan Message)
-	mu        sync.Mutex
-)
+func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
-// регистрация
-func HandlerSignUp(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	var userRequest UserRequest
-	if err := json.NewDecoder(r.Body).Decode(&userRequest); err != nil {
-		http.Error(w, "Invalid Request", http.StatusBadRequest)
-		return
-	}
-
-	var existingID int
-	err := database.DB.QueryRow(
-		"SELECT id FROM users WHERE username = $1",
-		userRequest.Username,
-	).Scan(&existingID)
-
-	if err == nil {
-		http.Error(w, "User already exist", http.StatusConflict)
-	} else if err != sql.ErrNoRows {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(userRequest.Password), 10)
+	token, err := h.AuthUC.SignUp(request.Username, request.Password)
 	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
+		if err.Error() == "user already exists" {
+			http.Error(w, err.Error(), http.StatusConflict)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
-
-	var userID int
-	err = database.DB.QueryRow(
-		"INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id",
-		userRequest.Username,
-		string(hashedPassword),
-	).Scan(&userID)
-
-	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-
-	token := auth.JWTCreate(uint(userID))
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 
-// авторизация
-func HandlerSignIn(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+func (h *AuthHandler) SignIn(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		return
 	}
 
-	var userRequest UserRequest
-	if err := json.NewDecoder(r.Body).Decode(&userRequest); err != nil {
-		http.Error(w, "Invalid Request", http.StatusBadRequest)
+	token, err := h.AuthUC.SignIn(request.Username, request.Password)
+	if err != nil {
 		return
 	}
 
-	var user entity.User
-	err := database.DB.QueryRow(
-		"SELECT id, password_hash FROM users WHERE username = $1",
-		userRequest.Username,
-	).Scan(&user.ID, &user.PasswordHash)
-
-	if err == sql.ErrNoRows {
-		http.Error(w, "User not found", http.StatusBadRequest)
-		return
-	} else if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-
-	if err := bcrypt.CompareHashAndPassword(
-		[]byte(user.PasswordHash), []byte(userRequest.Password),
-	); err != nil {
-		http.Error(w, "Wrong password", http.StatusBadRequest)
-		return
-	}
-
-	token := auth.JWTCreate(user.ID)
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 
-func HandlerChat(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value("userID").(uint)
-	if !ok {
-		log.Println("UserID not found in context")
-		return
-	}
-	var user entity.User
-	err := database.DB.QueryRow(
-		"SELECT username FROM users WHERE id = $1",
-		userID,
-	).Scan(&user.Username)
-
-	if err != nil {
-		log.Println("User not found:", err)
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println("Websocket upgrade error:", err)
-		return
-	}
-	defer conn.Close()
-
-	mu.Lock()
-	clients[conn] = user.Username
-	mu.Unlock()
-
-	sendHistory(conn)
-
-	for {
-		var msg Message
-		err := conn.ReadJSON(&msg)
-		if err != nil {
-			delete(clients, conn)
-			break
-		}
-		fullMsg := map[string]interface{}{
-			"username": clients[conn],
-			"data":     msg.Data,
-		}
-
-		mu.Lock()
-		messages = append(messages, fullMsg)
-		mu.Unlock()
-
-		messageCh <- msg
-	}
+type ChatHandler struct {
+	ChatUC usecases.Chat
 }
 
-func HandleMessages() {
-	for {
-		msg := <-messageCh
-
-		mu.Lock()
-		for client := range clients {
-			fullMsg := map[string]interface{}{
-				"username": clients[client],
-				"data":     msg.Data,
-			}
-
-			if err := client.WriteJSON(fullMsg); err != nil {
-				delete(clients, client)
-			}
-		}
-		mu.Unlock()
-	}
+func NewChatHandler(useCases usecases.Chat) *ChatHandler {
+	return &ChatHandler{ChatUC: useCases}
 }
 
-// отравка истории сообщений подключившемуся пользователю
-func sendHistory(conn *websocket.Conn) {
-	for _, msg := range messages {
-		if err := conn.WriteJSON(msg); err != nil {
-			return
-		}
-	}
+func (h *ChatHandler) HandleMessages() {
+	h.ChatUC.HandleMessages()
+}
+
+func (h *ChatHandler) HandleConnections(w http.ResponseWriter, r *http.Request) {
+	h.ChatUC.HandleConnections(w, r)
 }

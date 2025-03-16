@@ -12,6 +12,6 @@ services:
       - .env
     ports:
       - '8080:8080'
-    command: go run main.go
+    command: go run cmd/main.go
     depends_on:
       - postgres
